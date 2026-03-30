@@ -1,0 +1,61 @@
+name: Daily Tech Roundup
+
+on:
+  schedule:
+    # 1:30 AM UTC = 7:00 AM IST, weekdays only
+    - cron: '30 1 * * 1-5'
+  workflow_dispatch:  # Manual trigger for testing
+
+jobs:
+  roundup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Fetch podcast transcripts
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: python scripts/fetch_podcasts.py --days 2 --max-per-channel 2 -o /tmp/episodes.json
+
+      - name: Generate highlights
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/generate_highlights.py --input /tmp/episodes.json --output /tmp/highlights.json
+
+      - name: Check for highlights
+        id: check
+        run: |
+          HIGHLIGHT_COUNT=$(python -c "import json; data=json.load(open('/tmp/highlights.json')); print(sum(len(ep['highlights']) for ep in data))" 2>/dev/null || echo "0")
+          echo "highlight_count=$HIGHLIGHT_COUNT" >> $GITHUB_OUTPUT
+          if [ "$HIGHLIGHT_COUNT" -eq 0 ]; then
+            echo "No highlights generated. Skipping email."
+            exit 0
+          fi
+          echo "Generated $HIGHLIGHT_COUNT highlights"
+
+      - name: Render email
+        if: steps.check.outputs.highlight_count != '0'
+        run: python scripts/render_email.py --input /tmp/highlights.json --output /tmp/email.html
+
+      - name: Send email
+        if: steps.check.outputs.highlight_count != '0'
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python scripts/send_email.py --input /tmp/email.html
