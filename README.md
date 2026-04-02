@@ -13,7 +13,7 @@ Automated daily email digest of US tech industry news from 3 podcasts:
 3. **Render email** using Jinja2 template
 4. **Send via Resend** API
 
-Runs on GitHub Actions at 7:00 AM IST (1:30 AM UTC), weekdays only.
+Runs on GitHub Actions, triggered at 7:00 AM IST (1:30 AM UTC) weekdays by an external cron-job.org scheduler via `workflow_dispatch`. The GitHub Actions built-in cron schedule has been removed to prevent duplicate runs.
 
 ## Setup
 
