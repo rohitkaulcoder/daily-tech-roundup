@@ -40,18 +40,28 @@ jobs:
         run: |
           HIGHLIGHT_COUNT=$(python -c "import json; data=json.load(open('/tmp/highlights.json')); print(sum(len(ep['highlights']) for ep in data))" 2>/dev/null || echo "0")
           echo "highlight_count=$HIGHLIGHT_COUNT" >> $GITHUB_OUTPUT
-          if [ "$HIGHLIGHT_COUNT" -eq 0 ]; then
-            echo "No highlights generated. Skipping email."
-            exit 0
-          fi
           echo "Generated $HIGHLIGHT_COUNT highlights"
 
       - name: Render email
         if: steps.check.outputs.highlight_count != '0'
         run: python scripts/render_email.py --input /tmp/highlights.json --output /tmp/email.html
 
+      - name: Write no-content email
+        if: steps.check.outputs.highlight_count == '0'
+        run: |
+          cat > /tmp/email.html << 'NOCONTENTEOF'
+          <!DOCTYPE html>
+          <html>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">
+            <h2 style="color: #1a1a1a;">Daily Tech Roundup</h2>
+            <p style="font-size: 16px; line-height: 1.6;">No new podcast episodes were published today. Check back tomorrow!</p>
+            <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 24px 0;">
+            <p style="font-size: 12px; color: #999;">This is an automated digest from TBPN, TITV, and Techmeme Ride Home.</p>
+          </body>
+          </html>
+          NOCONTENTEOF
+
       - name: Send email
-        if: steps.check.outputs.highlight_count != '0'
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
