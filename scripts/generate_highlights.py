@@ -146,7 +146,7 @@ def main():
         print("(dry run — no API calls made)")
         return
 
-    client = anthropic.Anthropic()  # uses ANTHROPIC_API_KEY env var
+    client = anthropic.Anthropic(timeout=600.0)  # 10-min timeout per request
     all_highlights = []
 
     for ep in episodes_with_transcript:
