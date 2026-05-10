@@ -4,11 +4,11 @@ Automated daily email digest of US tech industry news from 3 podcasts:
 
 - **TBPN** — Technology's Daily Show
 - **TITV** — The Information's TITV
-- **Techmeme Ride Home**
+- **MTS Live** — daily "Best Of" YouTube roundup ([@mtsituation](https://www.youtube.com/@mtsituation))
 
 ## How it works
 
-1. **Fetch transcripts** from podcast RSS feeds (Groq Whisper for audio transcription)
+1. **Fetch transcripts** from podcast RSS feeds + YouTube channels (Groq Whisper for audio transcription, yt-dlp for YouTube audio extraction)
 2. **Generate highlights** via Anthropic API (Claude Sonnet)
 3. **Render email** using Jinja2 template
 4. **Send via Resend** API

@@ -48,10 +48,10 @@ CHANNELS = [
         "handle": "theinformation",
     },
     {
-        "name": "Techmeme Ride Home",
-        "rss_url": "https://feeds.megaphone.fm/techmemeridehome",
-        "has_rss_transcript": True,
-        "handle": "techmemeridehome",
+        "name": "MTS Live",
+        "youtube_channel_id": "UClWkDGXEzsh77GAhs90wpXw",
+        "youtube_title_filter": "Best Of",
+        "handle": "mtsituation",
     },
 ]
 
@@ -244,8 +244,146 @@ def check_rss_transcript_xml(rss_url: str, episode_title: str) -> Optional[str]:
 
 
 # =============================================================================
+# YOUTUBE CHANNEL DISCOVERY (yt-dlp + Groq path)
+# =============================================================================
+
+YT_CHANNEL_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+
+
+def get_youtube_channel_episodes(channel_id: str, days_back: int, max_results: int, title_filter: Optional[str] = None) -> list:
+    """Parse a YouTube channel's RSS feed and return recent videos."""
+    feed = feedparser.parse(YT_CHANNEL_FEED.format(channel_id=channel_id))
+    cutoff = datetime.now() - timedelta(days=days_back)
+    episodes = []
+
+    for entry in feed.entries:
+        pub_date = None
+        if hasattr(entry, "published_parsed") and entry.published_parsed:
+            pub_date = datetime(*entry.published_parsed[:6])
+        if not pub_date or pub_date < cutoff:
+            continue
+
+        title = entry.get("title", "")
+        if title_filter and title_filter.lower() not in title.lower():
+            continue
+
+        video_url = entry.get("link", "")
+        video_id = entry.get("yt_videoid") or (video_url.split("v=")[-1] if "v=" in video_url else None)
+
+        episodes.append({
+            "title": title,
+            "published_at": pub_date.isoformat(),
+            "description": entry.get("summary", "")[:500],
+            "url": video_url,
+            "video_id": video_id,
+            "audio_url": None,
+        })
+
+        if len(episodes) >= max_results:
+            break
+
+    return episodes
+
+
+def download_youtube_audio(video_url: str) -> Optional[str]:
+    """Download audio from a YouTube video using yt-dlp. Returns local path or None."""
+    import subprocess
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="ytdlp_")
+        out_template = os.path.join(tmp_dir, "audio.%(ext)s")
+        cmd = [
+            "yt-dlp",
+            "-f", "bestaudio/best",
+            "--extract-audio",
+            "--audio-format", "mp3",
+            "--audio-quality", "5",
+            "-o", out_template,
+            "--quiet",
+            "--no-warnings",
+            video_url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            print(f"    Warning: yt-dlp failed: {result.stderr.strip()[:200]}")
+            return None
+        for fname in os.listdir(tmp_dir):
+            if fname.startswith("audio."):
+                return os.path.join(tmp_dir, fname)
+        return None
+    except Exception as e:
+        print(f"    Warning: yt-dlp error: {e}")
+        return None
+
+
+# =============================================================================
 # TIER 2: GROQ WHISPER TRANSCRIPTION
 # =============================================================================
+
+def transcribe_local_audio_with_groq(tmp_path: str) -> Optional[str]:
+    """Transcribe an existing local audio file with Groq Whisper (handles compression)."""
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if not groq_key:
+        print("    Warning: GROQ_API_KEY not set, skipping Whisper transcription")
+        return None
+    try:
+        from groq import Groq
+    except ImportError:
+        print("    Warning: groq package not installed (pip install groq)")
+        return None
+
+    try:
+        file_size = os.path.getsize(tmp_path)
+        if file_size > 24 * 1024 * 1024:
+            for bitrate in ("32k", "16k"):
+                print(f"    Compressing audio ({file_size // 1024 // 1024}MB -> mono 16kHz {bitrate})...")
+                compressed_path = tmp_path + f".{bitrate}.mp3"
+                ret = os.system(
+                    f'ffmpeg -y -i "{tmp_path}" -ac 1 -ar 16000 -b:a {bitrate} "{compressed_path}" -loglevel error 2>&1'
+                )
+                if ret != 0 or not os.path.exists(compressed_path):
+                    print(f"    Warning: ffmpeg compression failed at {bitrate}")
+                    continue
+                new_size = os.path.getsize(compressed_path)
+                print(f"    Compressed to {new_size // 1024 // 1024}MB")
+                if new_size <= 24 * 1024 * 1024:
+                    os.unlink(tmp_path)
+                    tmp_path = compressed_path
+                    file_size = new_size
+                    break
+                os.unlink(compressed_path)
+            else:
+                print(f"    Warning: Still too large after compression")
+                os.unlink(tmp_path)
+                return None
+
+        print(f"    Transcribing with Groq Whisper ({file_size // 1024 // 1024}MB)...")
+        client = Groq(api_key=groq_key)
+        with open(tmp_path, "rb") as audio_file:
+            transcription = client.audio.transcriptions.create(
+                file=(os.path.basename(tmp_path), audio_file),
+                model="whisper-large-v3-turbo",
+                response_format="text",
+            )
+        os.unlink(tmp_path)
+        text = str(transcription).strip()
+        return text if len(text) > 100 else None
+    except Exception as e:
+        print(f"    Warning: Groq transcription error: {e}")
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        return None
+
+
+def transcribe_youtube_with_groq(video_url: str) -> Optional[str]:
+    """Download YouTube audio with yt-dlp, transcribe with Groq Whisper."""
+    print(f"    Downloading YouTube audio with yt-dlp...")
+    audio_path = download_youtube_audio(video_url)
+    if not audio_path:
+        return None
+    return transcribe_local_audio_with_groq(audio_path)
+
 
 def transcribe_with_groq(audio_url: str) -> Optional[str]:
     """Download podcast audio and transcribe with Groq Whisper."""
@@ -374,6 +512,13 @@ def get_transcript_tiered(channel: dict, episode: dict) -> tuple[Optional[str], 
     """
     title = episode["title"]
 
+    # YouTube-only channel: yt-dlp -> Groq Whisper
+    if channel.get("youtube_channel_id") and episode.get("url"):
+        transcript = transcribe_youtube_with_groq(episode["url"])
+        if transcript:
+            return transcript, "yt_dlp_groq"
+        return None, "none"
+
     # Tier 1: RSS transcript
     if channel.get("has_rss_transcript"):
         rss_entry = episode.get("rss_entry")
@@ -417,10 +562,17 @@ def fetch_all_podcasts(days_back: int = 2, max_per_channel: int = 2) -> list:
 
     for channel in CHANNELS:
         name = channel["name"]
-        rss_url = channel["rss_url"]
         print(f"  {name}...")
 
-        episodes = get_rss_episodes(rss_url, days_back, max_per_channel)
+        if channel.get("youtube_channel_id"):
+            episodes = get_youtube_channel_episodes(
+                channel["youtube_channel_id"],
+                days_back,
+                max_per_channel,
+                title_filter=channel.get("youtube_title_filter"),
+            )
+        else:
+            episodes = get_rss_episodes(channel["rss_url"], days_back, max_per_channel)
 
         if not episodes:
             print(f"  (no new episodes)")
@@ -453,7 +605,7 @@ def fetch_all_podcasts(days_back: int = 2, max_per_channel: int = 2) -> list:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fetch transcripts for Daily Tech Roundup (TBPN, TITV, Techmeme Ride Home)",
+        description="Fetch transcripts for Daily Tech Roundup (TBPN, TITV, MTS Live)",
     )
     parser.add_argument("--days", type=int, default=2, help="Days to look back (default: 2)")
     parser.add_argument("--max-per-channel", type=int, default=2, help="Max episodes per channel (default: 2)")
