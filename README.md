@@ -4,7 +4,7 @@ Automated daily email digest of US tech industry news from 3 podcasts:
 
 - **TBPN** — Technology's Daily Show
 - **TITV** — The Information's TITV
-- **MTS Live** — daily "Best Of" YouTube roundup ([@mtsituation](https://www.youtube.com/@mtsituation))
+- **MTS Live** — short daily YouTube videos, up to 5/day, skipping 7–8hr livestreams ([@mtsituation](https://www.youtube.com/@mtsituation))
 
 ## How it works
 

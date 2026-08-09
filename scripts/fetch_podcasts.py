@@ -50,8 +50,9 @@ CHANNELS = [
     {
         "name": "MTS Live",
         "youtube_channel_id": "UClWkDGXEzsh77GAhs90wpXw",
-        "youtube_title_filter": "Best Of",
         "handle": "mtsituation",
+        "skip_longer_than_seconds": 4 * 3600,  # skip 7-8hr livestreams, keep shorter daily videos
+        "max_episodes": 5,                     # cap short videos parsed per day
     },
 ]
 
@@ -283,6 +284,30 @@ def get_youtube_channel_episodes(channel_id: str, days_back: int, max_results: i
             break
 
     return episodes
+
+
+def get_youtube_video_duration(video_url: str) -> Optional[int]:
+    """Get a YouTube video's duration in seconds via yt-dlp (metadata only, no download)."""
+    import subprocess
+    try:
+        cmd = [
+            "yt-dlp",
+            "--skip-download",
+            "--print", "duration",
+            "--no-warnings",
+            video_url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            print(f"    Warning: yt-dlp duration lookup failed: {result.stderr.strip()[:200]}")
+            return None
+        raw = result.stdout.strip()
+        if not raw.isdigit():
+            return None
+        return int(raw)
+    except Exception as e:
+        print(f"    Warning: yt-dlp duration lookup error: {e}")
+        return None
 
 
 def download_youtube_audio(video_url: str) -> Optional[str]:
@@ -565,12 +590,31 @@ def fetch_all_podcasts(days_back: int = 2, max_per_channel: int = 2) -> list:
         print(f"  {name}...")
 
         if channel.get("youtube_channel_id"):
+            max_results = max(max_per_channel, channel.get("max_episodes", max_per_channel) + 8)
             episodes = get_youtube_channel_episodes(
                 channel["youtube_channel_id"],
                 days_back,
-                max_per_channel,
+                max_results,
                 title_filter=channel.get("youtube_title_filter"),
             )
+
+            # Skip long livestreams (e.g. 7-8hr MTS streams) via yt-dlp duration metadata
+            skip_seconds = channel.get("skip_longer_than_seconds")
+            if skip_seconds and episodes:
+                filtered = []
+                for ep in episodes:
+                    duration = get_youtube_video_duration(ep["url"])
+                    if duration is not None and duration >= skip_seconds:
+                        print(f"  > SKIP (too long, {duration // 60}min): {ep['title'][:60]}...")
+                        continue
+                    filtered.append(ep)
+                episodes = filtered
+
+            # Cap number of videos parsed per channel per day
+            max_episodes = channel.get("max_episodes", max_per_channel)
+            if len(episodes) > max_episodes:
+                print(f"  (capping {len(episodes)} -> {max_episodes} episodes)")
+                episodes = episodes[:max_episodes]
         else:
             episodes = get_rss_episodes(channel["rss_url"], days_back, max_per_channel)
 
