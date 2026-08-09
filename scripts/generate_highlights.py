@@ -29,24 +29,19 @@ FIREWORKS_MODEL = os.environ.get(
 )
 
 
-HIGHLIGHT_PROMPT = """Read the podcast transcript below and produce 3-15 analytical highlights, scaled to the transcript's length (shorter transcripts: 3-5; longer: up to 15).
+HIGHLIGHT_PROMPT = """Read the podcast transcript below and select the most interesting spoken "bytes" (quotes/excerpts) from the conversation. Produce between 3 and 15 bytes, scaled to the transcript's length (shorter transcripts: 3-5; longer: up to 15).
 
-Each highlight should be a 2-4 paragraph piece of ANALYSIS written for a busy professional reader — NOT a transcription of what was said. Do NOT reproduce the speaker's words verbatim or drop direct quotes into the text.
+Each byte is a memorable, substantive, verbatim excerpt worth quoting in a daily digest. For each byte you must extract three things:
 
-For each distinct thread in the conversation, you must:
-1. SYNTHESIZE — restate the core point and the speaker's reasoning in your own words, tightly.
-2. ANALYZE — add genuine commentary: what this means for the industry/companies involved, what it implies for the rest of the market, whether the claim is plausible, what the countervailing view is, and what to watch next.
+1. The byte itself — a lightly cleaned, verbatim quote from the speaker. Copy the actual words as spoken, but clean them up minimally: remove filler words ("um", "uh", "you know", repeated starts), remove live-show/sound effects tags (e.g. [music], [applause]), and fix transcription errors/trailing sentence fragments. Preserve the speaker's voice, wording, and a complete thought. Trim to a self-contained passage (roughly 75-200 words). Do NOT paraphrase, summarize, or rewrite the quote.
 
-It should read like an editor's take on the conversation, not the conversation itself. Distinguish the speaker (host or guest) and, where useful, note when a viewpoint is speculative or contested.
+2. A quick context summary — one or two sentences in your own words that tell the reader what this byte is about and why it matters. This is the teaser shown BEFORE the quote so readers can scan. Do not quote the speaker here.
 
-Structure each highlight as:
-- One opening line that states the argument (a hook a reader can scan).
-- The evidence/context the speaker gave, paraphrased.
-- Your analytical take and implications.
+3. The speaker — identify who said the byte (host or guest). Use the episode title and context to determine speaker names.
 
-Do NOT add labels like "Key insight" or "Why this matters." No lists — write flowing prose paragraphs only. Skip ad reads and sponsor segments.
+Skip ad reads, sponsor segments, and chit-chat. Do not add any labels like "Key insight" or "Why this matters" inside the quote text.
 
-Output as a JSON array. Each element has two keys: "speaker" (string) and "text" (string with the paragraphs). Only output the JSON, nothing else.
+Output as a JSON array. Each element has exactly three keys: "speaker" (string), "summary" (string, the quick context teaser), and "text" (string, the lightly cleaned byte quote). Only output the JSON, nothing else.
 
 EPISODE: {title}
 PODCAST: {podcast}

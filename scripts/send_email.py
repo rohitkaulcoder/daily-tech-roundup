@@ -31,9 +31,9 @@ def send_roundup(html_content: str, date_str: str) -> bool:
 
     try:
         result = resend.Emails.send({
-            "from": "Daily Tech Roundup <onboarding@resend.dev>",
+            "from": "Daily Roundup <onboarding@resend.dev>",
             "to": [recipient],
-            "subject": f"Daily Tech Roundup — {date_str}",
+            "subject": f"Daily MTS TBPN TITV Roundup — {date_str}",
             "html": html_content,
         })
         print(f"Email sent successfully. ID: {result.get('id', 'unknown')}")
