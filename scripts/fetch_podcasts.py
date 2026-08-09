@@ -38,14 +38,20 @@ CHANNELS = [
     {
         "name": "TBPN",
         "rss_url": "https://feeds.transistor.fm/technology-brother",
-        "has_rss_transcript": False,
+        "youtube_channel_id": "UC-DRzaGnL_vtBUpCFH5M0tg",
         "handle": "tbpnlive",
+        "skip_longer_than_seconds": 4 * 3600,  # skip long livestreams on YT
+        "skip_shorter_than_seconds": 5 * 60,   # skip YT Shorts/clip teasers (<5 min)
+        "max_episodes": 2,
     },
     {
         "name": "TITV",
         "rss_url": "https://anchor.fm/s/9add758/podcast/rss",
-        "has_rss_transcript": False,
+        "youtube_channel_id": "UCoKqUtcUtf8QPb0GWxe5e7Q",
         "handle": "theinformation",
+        "skip_longer_than_seconds": 4 * 3600,
+        "skip_shorter_than_seconds": 5 * 60,
+        "max_episodes": 2,
     },
     {
         "name": "MTS Live",
@@ -108,7 +114,44 @@ def get_rss_episodes(rss_url: str, days_back: int, max_results: int) -> list:
     return episodes
 
 
-def extract_rss_transcript(entry) -> Optional[str]:
+def normalize_title(title: str) -> str:
+    """Normalize a title for fuzzy matching (lowercase, alphanumeric only)."""
+    return re.sub(r"[^a-z0-9]", "", title.lower())
+
+
+def find_matching_youtube_episode(rss_title: str, youtube_episodes: list) -> Optional[dict]:
+    """Find the YouTube episode whose title best matches an RSS episode title.
+
+    RSS lists full episodes; YouTube feeds also contain clip/teaser titles.
+    Match on the longest shared normalized-prefix tiebreaker so we pick the
+    full episode upload rather than a short clip.
+    """
+    if not youtube_episodes:
+        return None
+    target = normalize_title(rss_title)
+    if not target:
+        return None
+
+    best = None
+    best_score = -1
+    for yt in youtube_episodes:
+        cand = normalize_title(yt["title"])
+        if not cand:
+            continue
+        # Score by count of shared leading characters.
+        shared = 0
+        for a, b in zip(target, cand):
+            if a != b:
+                break
+            shared += 1
+        if shared > best_score:
+            best_score = shared
+            best = yt
+
+    # Require a meaningful overlap (>= 8 leading chars) to avoid junk matches.
+    if best_score >= 8 and best:
+        return best
+    return None
     """Extract transcript from RSS entry's <podcast:transcript> tag."""
     # Approach 1: Check for podcast:transcript in links
     for link in getattr(entry, "links", []):
@@ -648,18 +691,26 @@ def get_transcript_tiered(channel: dict, episode: dict) -> tuple[Optional[str], 
     """
     title = episode["title"]
 
-    # YouTube-only channel: prefetched transcript (Apify/captions) -> yt-dlp -> Groq Whisper
-    if channel.get("youtube_channel_id") and episode.get("url"):
-        # Tier 1: transcript prefetched via Apify actor or caption API
+    yt_url = episode.get("_youtube_url")
+    if not yt_url and episode.get("youtube_match"):
+        yt_url = episode["youtube_match"]["url"]
+    if not yt_url and episode.get("url"):
+        if "youtube.com/" in episode["url"] or "youtu.be/" in episode["url"]:
+            yt_url = episode["url"]
+
+    # Channels with a YouTube representation (hybrid or pure YouTube):
+    # prefetched Apify/caption transcript -> yt-dlp -> Groq Whisper
+    if channel.get("youtube_channel_id") and yt_url:
         if episode.get("_prefetched_transcript"):
             return episode["_prefetched_transcript"], "apify_or_captions"
 
-        # Tier 2: yt-dlp -> Groq Whisper (often bot-blocked in cloud environments)
-        transcript = transcribe_youtube_with_groq(episode["url"])
+        transcript = transcribe_youtube_with_groq(yt_url)
         if transcript:
             return transcript, "yt_dlp_groq"
         return None, "none"
 
+    # RSS-only channels, or RSS fallback when no YouTube match was found:
+    # RSS transcript tags -> Groq Whisper on the RSS audio
     # Tier 1: RSS transcript
     if channel.get("has_rss_transcript"):
         rss_entry = episode.get("rss_entry")
@@ -705,8 +756,28 @@ def fetch_all_podcasts(days_back: int = 2, max_per_channel: int = 2) -> list:
         name = channel["name"]
         print(f"  {name}...")
 
-        if channel.get("youtube_channel_id"):
-            max_results = max(max_per_channel, channel.get("max_episodes", max_per_channel) + 8)
+        skip_seconds = channel.get("skip_longer_than_seconds")
+        min_seconds = channel.get("skip_shorter_than_seconds")
+        max_episodes = channel.get("max_episodes", max_per_channel)
+        use_apify = bool(os.environ.get("APIFY_API_KEY"))
+
+        if channel.get("youtube_channel_id") and channel.get("rss_url"):
+            # Hybrid: RSS lists only full episodes (no clip teasers). Discover via
+            # RSS, then match each episode to its full-length YouTube upload so we
+            # can fetch the transcript via Apify (free, bypasses cloud-IP block).
+            rss_episodes = get_rss_episodes(channel["rss_url"], days_back, max_episodes)
+            yt_candidates = get_youtube_channel_episodes(
+                channel["youtube_channel_id"], days_back, max_results=30
+            )
+
+            episodes = []
+            for ep in rss_episodes:
+                match = find_matching_youtube_episode(ep["title"], yt_candidates)
+                ep["youtube_match"] = match
+                episodes.append(ep)
+        else:
+            # Pure YouTube channel (e.g. MTS): discover from channel feed directly.
+            max_results = max(max_per_channel, max_episodes + 8)
             episodes = get_youtube_channel_episodes(
                 channel["youtube_channel_id"],
                 days_back,
@@ -714,54 +785,62 @@ def fetch_all_podcasts(days_back: int = 2, max_per_channel: int = 2) -> list:
                 title_filter=channel.get("youtube_title_filter"),
             )
 
-            skip_seconds = channel.get("skip_longer_than_seconds")
-            ep_items = []
-            for ep in episodes:
-                transcript = None
-                duration = None
+        ep_items = []
+        for ep in episodes:
+            transcript = None
+            duration = None
 
-                # Tier 1: Apify actor (runs on Apify infra, bypasses YouTube cloud-IP block)
-                if os.environ.get("APIFY_API_KEY"):
-                    result = get_youtube_transcript_via_apify(ep["url"])
-                    if result:
-                        transcript, duration = result
+            video_url = None
+            if ep.get("youtube_match"):
+                video_url = ep["youtube_match"]["url"]
+            elif ep.get("url") and (ep["url"].startswith("https://www.youtube.com/") or "youtu.be" in ep["url"]):
+                video_url = ep["url"]
 
-                # Tier 1.5: caption/auto-caption transcript (fallback)
-                if not transcript:
-                    video_id = ep.get("video_id")
-                    caption = get_youtube_caption_transcript(video_id) if video_id else None
+            # Tier 1: Apify actor (runs on Apify infra, bypasses YouTube cloud-IP block)
+            if use_apify and video_url:
+                result = get_youtube_transcript_via_apify(video_url)
+                if result:
+                    transcript, duration = result
+                    ep["_youtube_url"] = video_url
+
+            # Tier 1.5: caption/auto-caption transcript (fallback)
+            if not transcript:
+                video_id = None
+                if ep.get("youtube_match"):
+                    video_id = ep["youtube_match"].get("video_id") or (video_url.split("v=")[-1] if video_url and "v=" in video_url else None)
+                elif ep.get("video_id"):
+                    video_id = ep["video_id"]
+                if video_id:
+                    caption = get_youtube_caption_transcript(video_id)
                     if caption:
                         transcript, duration = caption
 
-                if transcript:
-                    # Skip long livestreams (e.g. 7-8hr MTS streams)
-                    if skip_seconds and duration is not None and duration >= skip_seconds:
-                        print(f"  > SKIP (too long, {duration // 60}min): {ep['title'][:60]}...")
-                        continue
-                    # Skip Shorts/reels (e.g. sub-2min MTS shorts)
-                    min_seconds = channel.get("skip_shorter_than_seconds")
-                    if min_seconds and duration is not None and duration < min_seconds:
-                        print(f"  > SKIP (too short, {duration // 60}min): {ep['title'][:60]}...")
-                        continue
-                    ep["_prefetched_transcript"] = transcript
-                    ep_items.append(ep)
+            if transcript:
+                # Skip long livestreams (e.g. 7-8hr MTS streams)
+                if skip_seconds and duration is not None and duration >= skip_seconds:
+                    print(f"  > SKIP (too long, {duration // 60}min): {ep['title'][:60]}...")
                     continue
+                # Skip Shorts/reels (e.g. sub-2min MTS shorts)
+                if min_seconds and duration is not None and duration < min_seconds:
+                    print(f"  > SKIP (too short, {duration // 60}min): {ep['title'][:60]}...")
+                    continue
+                ep["_prefetched_transcript"] = transcript
+                ep_items.append(ep)
+                continue
 
-                # Fallback: yt-dlp duration metadata (often blocked in cloud environments)
-                duration = get_youtube_video_duration(ep["url"])
+            # Fallback: yt-dlp duration metadata (often blocked in cloud environments)
+            if video_url:
+                duration = get_youtube_video_duration(video_url)
                 if duration is not None and skip_seconds and duration >= skip_seconds:
                     print(f"  > SKIP (too long, {duration // 60}min): {ep['title'][:60]}...")
                     continue
-                ep_items.append(ep)
-            episodes = ep_items
+            ep_items.append(ep)
 
-            # Cap number of videos parsed per channel per day
-            max_episodes = channel.get("max_episodes", max_per_channel)
-            if len(episodes) > max_episodes:
-                print(f"  (capping {len(episodes)} -> {max_episodes} episodes)")
-                episodes = episodes[:max_episodes]
-        else:
-            episodes = get_rss_episodes(channel["rss_url"], days_back, max_per_channel)
+        # Cap number of videos parsed per channel per day
+        if len(ep_items) > max_episodes:
+            print(f"  (capping {len(ep_items)} -> {max_episodes} episodes)")
+            ep_items = ep_items[:max_episodes]
+        episodes = ep_items
 
         if not episodes:
             print(f"  (no new episodes)")
@@ -777,10 +856,12 @@ def fetch_all_podcasts(days_back: int = 2, max_per_channel: int = 2) -> list:
             else:
                 print(f"    No transcript available")
 
+            ep_url = ep.get("_youtube_url") or (ep.get("youtube_match") or {}).get("url") or ep.get("url", "")
+
             all_episodes.append({
                 "podcast": name,
                 "title": ep["title"],
-                "url": ep["url"],
+                "url": ep_url,
                 "published_at": ep["published_at"],
                 "description": ep["description"],
                 "transcript": transcript,
