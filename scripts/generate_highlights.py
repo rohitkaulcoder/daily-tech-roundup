@@ -28,6 +28,10 @@ FIREWORKS_MODEL = os.environ.get(
     "FIREWORKS_MODEL", "accounts/fireworks/models/deepseek-v4-flash-0731"
 )
 
+# Skip reels/shorts: transcripts shorter than ~2 minutes of speech (~400 words)
+# are not worth digesting. Applies to all sources regardless of feed metadata.
+MIN_TRANSCRIPT_CHARS = int(os.environ.get("MIN_TRANSCRIPT_CHARS", "2400"))
+
 
 HIGHLIGHT_PROMPT = """Read the podcast transcript below and select the most interesting spoken "bytes" (quotes/excerpts) from the conversation. Produce between 3 and 15 bytes, scaled to the transcript's length (shorter transcripts: 3-5; longer: up to 15).
 
@@ -128,8 +132,12 @@ def main():
     with open(args.input) as f:
         episodes = json.load(f)
 
-    # Filter to episodes with transcripts
-    episodes_with_transcript = [e for e in episodes if e.get("has_transcript") and e.get("transcript")]
+    # Filter to episodes with transcripts, skipping reels/shorts (tiny transcripts)
+    all_with_transcript = [e for e in episodes if e.get("has_transcript") and e.get("transcript")]
+    episodes_with_transcript = [e for e in all_with_transcript if len(e["transcript"]) >= MIN_TRANSCRIPT_CHARS]
+    skipped_short = len(all_with_transcript) - len(episodes_with_transcript)
+    if skipped_short:
+        print(f"Skipped {skipped_short} short clip(s) (below {MIN_TRANSCRIPT_CHARS} chars)")
 
     if not episodes_with_transcript:
         print("No episodes with transcripts found. Nothing to do.")

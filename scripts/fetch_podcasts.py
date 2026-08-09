@@ -51,8 +51,9 @@ CHANNELS = [
         "name": "MTS Live",
         "youtube_channel_id": "UClWkDGXEzsh77GAhs90wpXw",
         "handle": "mtsituation",
-        "skip_longer_than_seconds": 4 * 3600,  # skip 7-8hr livestreams, keep shorter daily videos
-        "max_episodes": 5,                     # cap short videos parsed per day
+        "skip_longer_than_seconds": 4 * 3600,   # skip 7-8hr livestreams
+        "skip_shorter_than_seconds": 2 * 60,    # skip Shorts/reels (< 2 min)
+        "max_episodes": 5,
     },
 ]
 
@@ -736,6 +737,11 @@ def fetch_all_podcasts(days_back: int = 2, max_per_channel: int = 2) -> list:
                     # Skip long livestreams (e.g. 7-8hr MTS streams)
                     if skip_seconds and duration is not None and duration >= skip_seconds:
                         print(f"  > SKIP (too long, {duration // 60}min): {ep['title'][:60]}...")
+                        continue
+                    # Skip Shorts/reels (e.g. sub-2min MTS shorts)
+                    min_seconds = channel.get("skip_shorter_than_seconds")
+                    if min_seconds and duration is not None and duration < min_seconds:
+                        print(f"  > SKIP (too short, {duration // 60}min): {ep['title'][:60]}...")
                         continue
                     ep["_prefetched_transcript"] = transcript
                     ep_items.append(ep)
