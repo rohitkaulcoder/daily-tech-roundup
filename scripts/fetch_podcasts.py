@@ -348,7 +348,73 @@ def download_youtube_audio(video_url: str) -> Optional[str]:
 
 
 # =============================================================================
-# TIER 1.5: YouTube CAPTION TRANSCRIPT (works from datacenter IPs, no bot-check)
+# TIER 1.5: APIFY YOUTUBE TRANSCRIPT ACTOR (runs on Apify infra, not IP-blocked)
+# =============================================================================
+
+APIFY_ACTOR_ID = os.environ.get("APIFY_ACTOR_ID", "starvibe~youtube-video-transcript")
+APIFY_API_RUN_URL = (
+    "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items"
+    "?token={token}&timeout=120&format=json"
+)
+
+
+def get_youtube_transcript_via_apify(video_url: str) -> Optional[tuple[str, Optional[int]]]:
+    """Fetch a YouTube transcript via the Apify starvibe/youtube-video-transcript actor.
+
+    Returns (transcript_text, duration_seconds) or None. Runs on Apify's own
+    infrastructure, so it bypasses YouTube's cloud-provider IP block that breaks
+    yt-dlp and the caption API from GitHub Actions.
+
+    Requires APIFY_API_KEY env var.
+    """
+    apify_key = os.environ.get("APIFY_API_KEY")
+    if not apify_key:
+        print("    Warning: APIFY_API_KEY not set, skipping Apify transcript fetch")
+        return None
+
+    url = APIFY_API_RUN_URL.replace("{token}", apify_key) % APIFY_ACTOR_ID
+    payload = json.dumps({
+        "youtube_url": video_url,
+        "language": "en",
+        "include_transcript_text": True,
+    }).encode("utf-8")
+
+    try:
+        ctx = ssl.create_default_context()
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "DailyTechRoundup/1.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=180, context=ctx) as resp:
+            items = json.loads(resp.read().decode("utf-8"))
+
+        if not items:
+            return None
+
+        item = items[0]
+        status = (item.get("status") or "").lower()
+        if status == "error" or status == "failed":
+            print(f"    Warning: Apify actor error: {item.get('message', '')[:200]}")
+            return None
+
+        text = item.get("transcript_text", "").strip()
+        if not text or len(text) < 100:
+            print(f"    Warning: Apify returned no usable transcript for {video_url}")
+            return None
+
+        duration = item.get("duration_seconds")
+        duration = int(duration) if isinstance(duration, (int, float)) else None
+        return text, duration
+
+    except Exception as e:
+        print(f"    Warning: Apify transcript fetch failed: {e}")
+        return None
+
+
+# =============================================================================
+# TIER 1.5: YouTube CAPTION TRANSCRIPT (fallback from datacenter IPs, no bot-check)
 # =============================================================================
 
 def get_youtube_caption_transcript(video_id: str) -> Optional[tuple[str, Optional[int]]]:
@@ -581,11 +647,11 @@ def get_transcript_tiered(channel: dict, episode: dict) -> tuple[Optional[str], 
     """
     title = episode["title"]
 
-    # YouTube-only channel: caption transcript -> yt-dlp -> Groq Whisper
+    # YouTube-only channel: prefetched transcript (Apify/captions) -> yt-dlp -> Groq Whisper
     if channel.get("youtube_channel_id") and episode.get("url"):
-        # Tier 1: caption/auto-caption transcript (works from cloud IPs)
-        if episode.get("_caption_transcript"):
-            return episode["_caption_transcript"], "youtube_caption"
+        # Tier 1: transcript prefetched via Apify actor or caption API
+        if episode.get("_prefetched_transcript"):
+            return episode["_prefetched_transcript"], "apify_or_captions"
 
         # Tier 2: yt-dlp -> Groq Whisper (often bot-blocked in cloud environments)
         transcript = transcribe_youtube_with_groq(episode["url"])
@@ -650,15 +716,28 @@ def fetch_all_podcasts(days_back: int = 2, max_per_channel: int = 2) -> list:
             skip_seconds = channel.get("skip_longer_than_seconds")
             ep_items = []
             for ep in episodes:
-                video_id = ep.get("video_id")
-                caption = get_youtube_caption_transcript(video_id) if video_id else None
-                if caption:
-                    text, duration = caption
+                transcript = None
+                duration = None
+
+                # Tier 1: Apify actor (runs on Apify infra, bypasses YouTube cloud-IP block)
+                if os.environ.get("APIFY_API_KEY"):
+                    result = get_youtube_transcript_via_apify(ep["url"])
+                    if result:
+                        transcript, duration = result
+
+                # Tier 1.5: caption/auto-caption transcript (fallback)
+                if not transcript:
+                    video_id = ep.get("video_id")
+                    caption = get_youtube_caption_transcript(video_id) if video_id else None
+                    if caption:
+                        transcript, duration = caption
+
+                if transcript:
                     # Skip long livestreams (e.g. 7-8hr MTS streams)
                     if skip_seconds and duration is not None and duration >= skip_seconds:
                         print(f"  > SKIP (too long, {duration // 60}min): {ep['title'][:60]}...")
                         continue
-                    ep["_caption_transcript"] = text
+                    ep["_prefetched_transcript"] = transcript
                     ep_items.append(ep)
                     continue
 
