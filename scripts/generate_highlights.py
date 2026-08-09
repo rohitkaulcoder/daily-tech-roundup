@@ -3,10 +3,10 @@
 Generate Podcast Highlights — Daily Tech Roundup
 =================================================
 Reads episodes JSON (from fetch_podcasts.py), generates highlights
-via Anthropic API, and outputs structured highlights JSON.
+via Fireworks AI (OpenAI-compatible API), and outputs structured highlights JSON.
 
-Replaces the `claude --print` subprocess approach from podcast-digest
-with direct Anthropic SDK calls — works in GitHub Actions.
+Uses the `openai` client pointed at Fireworks' inference endpoint —
+works in GitHub Actions with a FIREWORKS_API_KEY secret.
 
 Usage:
     python generate_highlights.py --input episodes.json --output highlights.json
@@ -18,7 +18,15 @@ import json
 import os
 import sys
 
-import anthropic
+import openai
+
+
+FIREWORKS_BASE_URL = os.environ.get(
+    "FIREWORKS_BASE_URL", "https://api.fireworks.ai/inference/v1"
+)
+FIREWORKS_MODEL = os.environ.get(
+    "FIREWORKS_MODEL", "accounts/fireworks/models/deepseek-v4-flash-0731"
+)
 
 
 HIGHLIGHT_PROMPT = """Read the podcast transcript below and extract 10-15 highlights.
@@ -40,8 +48,8 @@ TRANSCRIPT:
 {transcript}"""
 
 
-def generate_highlights(episode: dict, client: anthropic.Anthropic) -> list:
-    """Generate highlights for an episode using Anthropic API."""
+def generate_highlights(episode: dict, client: openai.OpenAI) -> list:
+    """Generate highlights for an episode using the Fireworks API."""
     title = episode["title"]
     podcast = episode["podcast"]
     transcript = episode["transcript"]
@@ -62,14 +70,15 @@ def generate_highlights(episode: dict, client: anthropic.Anthropic) -> list:
     )
 
     try:
-        print(f"    Calling Anthropic API...")
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+        print(f"    Calling Fireworks API ({FIREWORKS_MODEL})...")
+        response = client.chat.completions.create(
+            model=FIREWORKS_MODEL,
             max_tokens=8192,
+            temperature=0.3,
             messages=[{"role": "user", "content": prompt}],
         )
 
-        raw = response.content[0].text.strip()
+        raw = response.choices[0].message.content or ""
 
         # Strip markdown code fences
         raw = raw.replace("```json", "").replace("```", "").strip()
@@ -84,8 +93,9 @@ def generate_highlights(episode: dict, client: anthropic.Anthropic) -> list:
         highlights = json.loads(raw)
 
         # Log token usage
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
+        usage = response.usage
+        input_tokens = getattr(usage, "prompt_tokens", 0)
+        output_tokens = getattr(usage, "completion_tokens", 0)
         print(f"    Tokens: {input_tokens:,} in / {output_tokens:,} out")
 
         return highlights
@@ -93,8 +103,8 @@ def generate_highlights(episode: dict, client: anthropic.Anthropic) -> list:
     except json.JSONDecodeError as e:
         print(f"    Error: Failed to parse API output as JSON: {e}")
         return []
-    except anthropic.APIError as e:
-        print(f"    Error: Anthropic API error: {e}")
+    except openai.APIError as e:
+        print(f"    Error: Fireworks API error: {e}")
         return []
     except Exception as e:
         print(f"    Error: {e}")
@@ -102,7 +112,7 @@ def generate_highlights(episode: dict, client: anthropic.Anthropic) -> list:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate podcast highlights via Anthropic API")
+    parser = argparse.ArgumentParser(description="Generate podcast highlights via Fireworks API")
     parser.add_argument("--input", type=str, required=True, help="Input episodes JSON file")
     parser.add_argument("--output", type=str, help="Output highlights JSON file")
     parser.add_argument("--dry-run", action="store_true", help="Print prompt instead of calling API")
@@ -146,7 +156,11 @@ def main():
         print("(dry run — no API calls made)")
         return
 
-    client = anthropic.Anthropic(timeout=600.0)  # 10-min timeout per request
+    client = openai.OpenAI(
+        api_key=os.environ.get("FIREWORKS_API_KEY"),
+        base_url=FIREWORKS_BASE_URL,
+        timeout=600.0,  # 10-min timeout per request
+    )
     all_highlights = []
 
     for ep in episodes_with_transcript:
