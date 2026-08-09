@@ -29,17 +29,24 @@ FIREWORKS_MODEL = os.environ.get(
 )
 
 
-HIGHLIGHT_PROMPT = """Read the podcast transcript below and extract 10-15 highlights.
+HIGHLIGHT_PROMPT = """Read the podcast transcript below and produce 3-15 analytical highlights, scaled to the transcript's length (shorter transcripts: 3-5; longer: up to 15).
 
-Each highlight should be a 3-4 paragraph mini-essay that captures one complete idea arc from the conversation. It should read like a well-written blog excerpt — not a transcript and not a dry summary. Preserve the speaker's insight, their reasoning, the evidence they cite, and the conclusion, all in tight clear prose. Cut all filler, repetition, and meandering — just the substance.
+Each highlight should be a 2-4 paragraph piece of ANALYSIS written for a busy professional reader — NOT a transcription of what was said. Do NOT reproduce the speaker's words verbatim or drop direct quotes into the text.
 
-Do NOT add any labels like "Key insight" or "Why this matters." The highlight should stand entirely on its own.
+For each distinct thread in the conversation, you must:
+1. SYNTHESIZE — restate the core point and the speaker's reasoning in your own words, tightly.
+2. ANALYZE — add genuine commentary: what this means for the industry/companies involved, what it implies for the rest of the market, whether the claim is plausible, what the countervailing view is, and what to watch next.
 
-For each highlight, identify the speaker (host or guest). Use the episode title and context to determine speaker names.
+It should read like an editor's take on the conversation, not the conversation itself. Distinguish the speaker (host or guest) and, where useful, note when a viewpoint is speculative or contested.
 
-Output as a JSON array. Each element has two keys: "speaker" (string) and "text" (string with the 3-4 paragraph highlight).
+Structure each highlight as:
+- One opening line that states the argument (a hook a reader can scan).
+- The evidence/context the speaker gave, paraphrased.
+- Your analytical take and implications.
 
-Only output the JSON, nothing else. Skip any ad reads or sponsor segments.
+Do NOT add labels like "Key insight" or "Why this matters." No lists — write flowing prose paragraphs only. Skip ad reads and sponsor segments.
+
+Output as a JSON array. Each element has two keys: "speaker" (string) and "text" (string with the paragraphs). Only output the JSON, nothing else.
 
 EPISODE: {title}
 PODCAST: {podcast}

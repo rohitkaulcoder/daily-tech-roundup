@@ -341,6 +341,43 @@ def download_youtube_audio(video_url: str) -> Optional[str]:
 
 
 # =============================================================================
+# TIER 1.5: YouTube CAPTION TRANSCRIPT (works from datacenter IPs, no bot-check)
+# =============================================================================
+
+def get_youtube_caption_transcript(video_id: str) -> Optional[tuple[str, Optional[int]]]:
+    """Fetch a YouTube video's caption/auto-caption transcript.
+
+    Returns (transcript_text, duration_seconds) or None. Duration is derived
+    from the last caption snippet (start + duration), which lets us skip
+    long livestreams without a yt-dlp download. Prefer captions over
+    yt-dlp+Groq because yt-dlp is often blocked in cloud environments.
+    """
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        ytt_api = YouTubeTranscriptApi()
+        fetched = ytt_api.fetch(video_id, languages=("en",))
+        snippets = fetched.snippets
+        if not snippets:
+            return None
+
+        text = " ".join(s.text for s in snippets)
+        text = re.sub(r"\[Music\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[Applause\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        if len(text) < 100:
+            return None
+
+        last = snippets[-1]
+        duration_seconds = round(last.start + last.duration)
+        return text, duration_seconds
+
+    except Exception as e:
+        print(f"    Warning: caption transcript fetch failed: {e}")
+        return None
+
+
+# =============================================================================
 # TIER 2: GROQ WHISPER TRANSCRIPTION
 # =============================================================================
 
@@ -537,8 +574,13 @@ def get_transcript_tiered(channel: dict, episode: dict) -> tuple[Optional[str], 
     """
     title = episode["title"]
 
-    # YouTube-only channel: yt-dlp -> Groq Whisper
+    # YouTube-only channel: caption transcript -> yt-dlp -> Groq Whisper
     if channel.get("youtube_channel_id") and episode.get("url"):
+        # Tier 1: caption/auto-caption transcript (works from cloud IPs)
+        if episode.get("_caption_transcript"):
+            return episode["_caption_transcript"], "youtube_caption"
+
+        # Tier 2: yt-dlp -> Groq Whisper (often bot-blocked in cloud environments)
         transcript = transcribe_youtube_with_groq(episode["url"])
         if transcript:
             return transcript, "yt_dlp_groq"
@@ -598,17 +640,28 @@ def fetch_all_podcasts(days_back: int = 2, max_per_channel: int = 2) -> list:
                 title_filter=channel.get("youtube_title_filter"),
             )
 
-            # Skip long livestreams (e.g. 7-8hr MTS streams) via yt-dlp duration metadata
             skip_seconds = channel.get("skip_longer_than_seconds")
-            if skip_seconds and episodes:
-                filtered = []
-                for ep in episodes:
-                    duration = get_youtube_video_duration(ep["url"])
-                    if duration is not None and duration >= skip_seconds:
+            ep_items = []
+            for ep in episodes:
+                video_id = ep.get("video_id")
+                caption = get_youtube_caption_transcript(video_id) if video_id else None
+                if caption:
+                    text, duration = caption
+                    # Skip long livestreams (e.g. 7-8hr MTS streams)
+                    if skip_seconds and duration is not None and duration >= skip_seconds:
                         print(f"  > SKIP (too long, {duration // 60}min): {ep['title'][:60]}...")
                         continue
-                    filtered.append(ep)
-                episodes = filtered
+                    ep["_caption_transcript"] = text
+                    ep_items.append(ep)
+                    continue
+
+                # Fallback: yt-dlp duration metadata (often blocked in cloud environments)
+                duration = get_youtube_video_duration(ep["url"])
+                if duration is not None and skip_seconds and duration >= skip_seconds:
+                    print(f"  > SKIP (too long, {duration // 60}min): {ep['title'][:60]}...")
+                    continue
+                ep_items.append(ep)
+            episodes = ep_items
 
             # Cap number of videos parsed per channel per day
             max_episodes = channel.get("max_episodes", max_per_channel)
