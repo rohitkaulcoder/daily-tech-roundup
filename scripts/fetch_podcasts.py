@@ -250,6 +250,11 @@ def check_rss_transcript_xml(rss_url: str, episode_title: str) -> Optional[str]:
 
 YT_CHANNEL_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 
+# Bypass YouTube's "Sign in to confirm you're not a bot" gate, which is
+# triggered on default (web) clients from cloud/datacenter IPs. The android/tv
+# clients use a different extraction path that is usually allowed.
+YT_EXTRACTOR_ARGS = "youtube:player_client=android,tv"
+
 
 def get_youtube_channel_episodes(channel_id: str, days_back: int, max_results: int, title_filter: Optional[str] = None) -> list:
     """Parse a YouTube channel's RSS feed and return recent videos."""
@@ -295,6 +300,7 @@ def get_youtube_video_duration(video_url: str) -> Optional[int]:
             "--skip-download",
             "--print", "duration",
             "--no-warnings",
+            "--extractor-args", YT_EXTRACTOR_ARGS,
             video_url,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -325,6 +331,7 @@ def download_youtube_audio(video_url: str) -> Optional[str]:
             "-o", out_template,
             "--quiet",
             "--no-warnings",
+            "--extractor-args", YT_EXTRACTOR_ARGS,
             video_url,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
