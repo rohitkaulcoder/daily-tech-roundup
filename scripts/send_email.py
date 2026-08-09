@@ -17,7 +17,7 @@ from datetime import datetime
 import resend
 
 
-def send_roundup(html_content: str, date_str: str) -> bool:
+def send_roundup(html_content: str, date_str: str, subject: str = None) -> bool:
     """Send the daily roundup email via Resend."""
     resend.api_key = os.environ.get("RESEND_API_KEY")
     if not resend.api_key:
@@ -29,11 +29,14 @@ def send_roundup(html_content: str, date_str: str) -> bool:
         print("Error: RECIPIENT_EMAIL not set", file=sys.stderr)
         return False
 
+    if subject is None:
+        subject = f"Daily MTS TBPN TITV Roundup — {date_str}"
+
     try:
         result = resend.Emails.send({
             "from": "Daily Roundup <onboarding@resend.dev>",
             "to": [recipient],
-            "subject": f"Daily MTS TBPN TITV Roundup — {date_str}",
+            "subject": subject,
             "html": html_content,
         })
         print(f"Email sent successfully. ID: {result.get('id', 'unknown')}")
@@ -50,6 +53,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print HTML to stdout instead of sending")
     parser.add_argument("--date", type=str, default=datetime.now().strftime("%B %d, %Y"),
                         help="Date for subject line (default: today)")
+    parser.add_argument("--subject", type=str,
+                        help="Custom subject line (overrides the default)")
 
     args = parser.parse_args()
 
@@ -69,7 +74,7 @@ def main():
         print("\n(dry run — email not sent)", file=sys.stderr)
         return
 
-    if not send_roundup(html_content, args.date):
+    if not send_roundup(html_content, args.date, subject=args.subject):
         sys.exit(1)
 
 

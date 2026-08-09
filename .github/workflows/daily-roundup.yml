@@ -74,3 +74,23 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: python scripts/send_email.py --input /tmp/email.html
+
+      - name: Notify failure
+        if: failure()
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cat > /tmp/failure.html << 'FAILEOF'
+          <!DOCTYPE html>
+          <html>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">
+            <h2 style="color: #b91c1c;">Daily Roundup — run failed</h2>
+            <p style="font-size: 16px; line-height: 1.6;">The automated roundup did not complete successfully. Check the run logs for details:</p>
+            <p><a href="$RUN_URL" style="font-size: 15px; color: #1d4ed8;">Open workflow run</a></p>
+          </body>
+          </html>
+          FAILEOF
+          python scripts/send_email.py --input /tmp/failure.html \
+            --subject "Daily Roundup FAILED — action needed"
