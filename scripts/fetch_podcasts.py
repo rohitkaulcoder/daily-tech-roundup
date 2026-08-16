@@ -398,7 +398,7 @@ def download_youtube_audio(video_url: str) -> Optional[str]:
 APIFY_ACTOR_ID = os.environ.get("APIFY_ACTOR_ID", "starvibe~youtube-video-transcript")
 APIFY_API_RUN_URL = (
     "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items"
-    "?token={token}&timeout=120&format=json"
+    "?token={token}&timeout=240&format=json"
 )
 
 
@@ -423,7 +423,7 @@ def get_youtube_transcript_via_apify(video_url: str) -> Optional[tuple[str, Opti
         "include_transcript_text": True,
     }).encode("utf-8")
 
-    try:
+    def _call_apify() -> list:
         ctx = ssl.create_default_context()
         req = urllib.request.Request(
             url,
@@ -431,10 +431,21 @@ def get_youtube_transcript_via_apify(video_url: str) -> Optional[tuple[str, Opti
             headers={"Content-Type": "application/json", "User-Agent": "DailyTechRoundup/1.0"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=180, context=ctx) as resp:
-            items = json.loads(resp.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=300, context=ctx) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        items = _call_apify()
+
+        # Retry once with a short backoff if the sync call came back empty or errored
+        # (Apify's run-sync can return early under load, especially at scheduled time).
+        if not items:
+            print("    Apify sync returned empty, retrying once...")
+            time.sleep(5)
+            items = _call_apify()
 
         if not items:
+            print(f"    Warning: Apify returned no dataset items for {video_url}")
             return None
 
         item = items[0]
