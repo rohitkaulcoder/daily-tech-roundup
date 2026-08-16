@@ -18,6 +18,38 @@ from datetime import datetime
 from jinja2 import Environment, FileSystemLoader
 
 
+TOPIC_ORDER = [
+    "AI & Models",
+    "Chips & Infrastructure",
+    "Deals & Funding",
+    "Companies & Markets",
+    "Policy & Regulation",
+]
+
+
+def group_by_topic(highlights_data: list) -> list:
+    """Group all items across episodes into ordered topic buckets."""
+    buckets = {t: [] for t in TOPIC_ORDER}
+    for ep in highlights_data:
+        episode_info = ep.get("episode", {})
+        podcast = episode_info.get("podcast", "")
+        url = episode_info.get("url", "")
+        for h in ep.get("highlights", []):
+            topic = h.get("topic", "")
+            if topic not in buckets:
+                topic = "Companies & Markets"
+            buckets[topic].append({
+                "headline": h.get("headline", ""),
+                "context": h.get("context", ""),
+                "speaker": h.get("speaker", ""),
+                "quote": h.get("quote", ""),
+                "source": podcast,
+                "url": url,
+            })
+
+    return [{"topic": t, "highlights": buckets[t]} for t in TOPIC_ORDER if buckets[t]]
+
+
 def render_email(highlights_data: list, date_str: str) -> str:
     """Render email HTML from highlights data."""
     template_dir = os.path.join(os.path.dirname(__file__), "..", "templates")
@@ -26,6 +58,7 @@ def render_email(highlights_data: list, date_str: str) -> str:
 
     episode_count = len(highlights_data)
     highlight_count = sum(len(ep["highlights"]) for ep in highlights_data)
+    topics = group_by_topic(highlights_data)
 
     # Format date for display
     try:
@@ -38,7 +71,7 @@ def render_email(highlights_data: list, date_str: str) -> str:
         date=formatted_date,
         episode_count=episode_count,
         highlight_count=highlight_count,
-        episodes=highlights_data,
+        topics=topics,
     )
 
 

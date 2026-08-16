@@ -33,19 +33,30 @@ FIREWORKS_MODEL = os.environ.get(
 MIN_TRANSCRIPT_CHARS = int(os.environ.get("MIN_TRANSCRIPT_CHARS", "2400"))
 
 
-HIGHLIGHT_PROMPT = """Read the podcast transcript below and select the most interesting spoken "bytes" (quotes/excerpts) from the conversation. Produce between 3 and 15 bytes, scaled to the transcript's length (shorter transcripts: 3-5; longer: up to 15).
+HIGHLIGHT_PROMPT = """You are a high-signal tech-news editor. Read the podcast transcript below and extract ONLY items a busy tech professional genuinely needs to know.
 
-Each byte is a memorable, substantive, verbatim excerpt worth quoting in a daily digest. For each byte you must extract three things:
+STRICTLY EXCLUDE (low-signal noise — drop all of it):
+- Banter, jokes, personal anecdotes, chat/community chatter, host riffing
+- visual/stage direction, sound-effect tags, intros/outros
+- Merch plugs, ad reads, sponsor segments, self-promotion
+- Trivia that has no real-world stakes, pure speculation without evidence
+- Retreads of already-widely-known news with nothing new added
+Only keep items with real news, hard data, a fresh named insight, or a consequential shift for companies/markets. Fewer, sharper items are better than many. If everything in the episode is noise, output [].
 
-1. The byte itself — a lightly cleaned, verbatim quote from the speaker. Copy the actual words as spoken, but clean them up minimally: remove filler words ("um", "uh", "you know", repeated starts), remove live-show/sound effects tags (e.g. [music], [applause]), and fix transcription errors/trailing sentence fragments. Preserve the speaker's voice, wording, and a complete thought. Trim to a self-contained passage (roughly 75-200 words). Do NOT paraphrase, summarize, or rewrite the quote.
+For each item you keep, extract EXACTLY these fields:
 
-2. A quick context summary — one or two sentences in your own words that tell the reader what this byte is about and why it matters. This is the teaser shown BEFORE the quote so readers can scan. Do not quote the speaker here.
+1. "topic" — the single most relevant theme, chosen ONLY from this fixed list:
+   "AI & Models" | "Chips & Infrastructure" | "Deals & Funding" | "Companies & Markets" | "Policy & Regulation"
 
-3. The speaker — identify who said the byte (host or guest). Use the episode title and context to determine speaker names.
+2. "headline" — one short declarative headline (12 words max) stating the actual news/claim. No fluff, no marketing tone.
 
-Skip ad reads, sponsor segments, and chit-chat. Do not add any labels like "Key insight" or "Why this matters" inside the quote text.
+3. "context" — 1–2 sentences, in your own words (NOT quoted), that say what happened and why it matters to the industry. This is the scan-friendly summary.
 
-Output as a JSON array. Each element has exactly three keys: "speaker" (string), "summary" (string, the quick context teaser), and "text" (string, the lightly cleaned byte quote). Only output the JSON, nothing else.
+4. "speaker" — who said it (host or guest), if determinable, else "".
+
+5. "quote" — ONE compact verbatim quote, at most 2 sentences and ~40 words, lightly cleaned (remove fillers like "um"/"you know", [music]/[applause] tags, repeated starts; fix truncation). Only include the quote if the speaker actually said something punchy and quotable; otherwise set it to "". NEVER fabricate or paraphrase the quote — quote only real words from the transcript.
+
+Output as a JSON array. Each element has exactly the keys "topic", "headline", "context", "speaker", "quote". Only output the JSON, nothing else.
 
 EPISODE: {title}
 PODCAST: {podcast}
