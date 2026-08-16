@@ -360,6 +360,58 @@ def get_youtube_video_duration(video_url: str) -> Optional[int]:
         return None
 
 
+def get_youtube_captions_with_ytdlp(video_url: str) -> Optional[str]:
+    """Fetch a YouTube video's subtitles/auto-captions via yt-dlp.
+
+    Returns concatenated caption text or None. yt-dlp can fetch captions in
+    --skip-download mode (text only, no audio). May be bot-blocked in cloud
+    environments, which is why Apify is the tier-1 source.
+    """
+    import subprocess
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="ytcaptions_")
+        out_template = os.path.join(tmp_dir, "cap.%(ext)s")
+        cmd = [
+            "yt-dlp",
+            "--skip-download",
+            "--write-auto-subs",
+            "--write-subs",
+            "--sub-langs", "en",
+            "--sub-format", "vtt",
+            "--no-warnings",
+            "--extractor-args", YT_EXTRACTOR_ARGS,
+            "-o", out_template,
+            video_url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if result.returncode != 0:
+            print(f"    Warning: yt-dlp caption fetch failed: {result.stderr.strip()[:200]}")
+            return None
+
+        # Read any .vtt/.srt file produced
+        texts = []
+        for fname in os.listdir(tmp_dir):
+            if not (fname.endswith(".vtt") or fname.endswith(".srt")):
+                continue
+            path = os.path.join(tmp_dir, fname)
+            with open(path, encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+            if fname.endswith(".vtt"):
+                texts.append(parse_vtt(raw))
+            else:
+                texts.append(parse_srt(raw))
+
+        joined = " ".join(t for t in texts if t)
+        joined = re.sub(r"\s+", " ", joined).strip()
+        if len(joined) > 100:
+            return joined
+        return None
+
+    except Exception as e:
+        print(f"    Warning: yt-dlp caption fetch error: {e}")
+        return None
+
+
 def download_youtube_audio(video_url: str) -> Optional[str]:
     """Download audio from a YouTube video using yt-dlp. Returns local path or None."""
     import subprocess
@@ -652,6 +704,74 @@ def transcribe_with_groq(audio_url: str) -> Optional[str]:
 
 
 # =============================================================================
+# TIER 2.5: ASSEMBLYAI TRANSCRIPTION (direct audio URL, third backup)
+# =============================================================================
+
+ASSEMBLYAI_API_URL = "https://api.assemblyai.com/v2/transcript"
+
+
+def transcribe_with_assemblyai(audio_url: str, poll_limit_s: int = 240) -> Optional[str]:
+    """Transcribe a public audio URL with AssemblyAI (Universal-1).
+
+    Returns the transcript text or None. Useful as a third backup that can
+    consume direct audio URLs (e.g. podcast RSS enclosures) without needing
+    to download audio on the runner — AssemblyAI fetches the URL server-side.
+
+    Requires ASSEMBLYAI_API_KEY env var.
+    """
+    aai_key = os.environ.get("ASSEMBLYAI_API_KEY")
+    if not aai_key:
+        print("    Warning: ASSEMBLYAI_API_KEY not set, skipping AssemblyAI transcription")
+        return None
+
+    headers = {
+        "authorization": aai_key,
+        "content-type": "application/json",
+    }
+
+    try:
+        # 1) Submit transcription job
+        ctx = ssl.create_default_context()
+        req = urllib.request.Request(
+            ASSEMBLYAI_API_URL,
+            data=json.dumps({"audio_url": audio_url}).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+            job = json.loads(resp.read().decode("utf-8"))
+        job_id = job.get("id")
+        if not job_id:
+            print(f"    Warning: AssemblyAI submit failed: {job.get('error', 'no id')[:200]}")
+            return None
+
+        # 2) Poll until completed
+        status_url = f"{ASSEMBLYAI_API_URL}/{job_id}"
+        deadline = time.time() + poll_limit_s
+        while time.time() < deadline:
+            time.sleep(10)
+            req = urllib.request.Request(status_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+                job = json.loads(resp.read().decode("utf-8"))
+            status = job.get("status", "")
+            if status == "completed":
+                text = (job.get("text") or "").strip()
+                if len(text) > 100:
+                    return text
+                return None
+            if status == "error":
+                print(f"    Warning: AssemblyAI job error: {job.get('error', '')[:200]}")
+                return None
+
+        print(f"    Warning: AssemblyAI transcription timed out after {poll_limit_s}s")
+        return None
+
+    except Exception as e:
+        print(f"    Warning: AssemblyAI transcription error: {e}")
+        return None
+
+
+# =============================================================================
 # TIER 3: YOUTUBE TRANSCRIPT (FALLBACK)
 # =============================================================================
 
@@ -697,8 +817,10 @@ def get_youtube_transcript(handle: str, episode_title: str) -> Optional[str]:
 
 def get_transcript_tiered(channel: dict, episode: dict) -> tuple[Optional[str], str]:
     """
-    Try to get transcript using tiered approach.
-    Returns (transcript_text, source) where source is 'rss', 'groq_whisper', 'youtube', or 'none'.
+    Try to get transcript using the tiered chain:
+    Apify (prefetched) -> yt-dlp captions -> AssemblyAI (RSS audio). Stops after these.
+    Returns (transcript_text, source) where source is 'apify', 'yt_dlp_captions',
+    'assemblyai', or 'none'.
     """
     title = episode["title"]
 
@@ -709,46 +831,29 @@ def get_transcript_tiered(channel: dict, episode: dict) -> tuple[Optional[str], 
         if "youtube.com/" in episode["url"] or "youtu.be/" in episode["url"]:
             yt_url = episode["url"]
 
-    # Channels with a YouTube representation (hybrid or pure YouTube):
-    # prefetched Apify/caption transcript -> yt-dlp -> Groq Whisper
+    # Tiered chain: Apify (prefetched) -> yt-dlp captions -> AssemblyAI (RSS audio)
+    # Stop after these — no Groq, no caption-API, no YouTube-search fallback.
+
+    # Tier 1: transcript prefetched via Apify actor during episode discovery
+    if episode.get("_prefetched_transcript"):
+        return episode["_prefetched_transcript"], "apify"
+
+    # Tier 2: yt-dlp captions for any channel with a YouTube representation
     if channel.get("youtube_channel_id") and yt_url:
-        if episode.get("_prefetched_transcript"):
-            return episode["_prefetched_transcript"], "apify_or_captions"
-
-        transcript = transcribe_youtube_with_groq(yt_url)
+        transcript = get_youtube_captions_with_ytdlp(yt_url)
         if transcript:
-            return transcript, "yt_dlp_groq"
-        return None, "none"
+            return transcript, "yt_dlp_captions"
 
-    # RSS-only channels, or RSS fallback when no YouTube match was found:
-    # RSS transcript tags -> Groq Whisper on the RSS audio
-    # Tier 1: RSS transcript
-    if channel.get("has_rss_transcript"):
-        rss_entry = episode.get("rss_entry")
-        if rss_entry:
-            transcript = extract_rss_transcript(rss_entry)
-            if transcript and len(transcript) > 100:
-                return transcript, "rss"
+        # Pure YouTube channels (no RSS audio to fall back to): stop here.
+        if not channel.get("rss_url"):
+            return None, "none"
 
-        # Tier 1.5: Try raw XML parsing
-        transcript = check_rss_transcript_xml(channel["rss_url"], title)
-        if transcript and len(transcript) > 100:
-            return transcript, "rss"
-
-    # Tier 2: Groq Whisper
+    # Tier 3: AssemblyAI on the RSS audio URL (server-side fetch, no download)
     audio_url = episode.get("audio_url")
-    if audio_url:
-        transcript = transcribe_with_groq(audio_url)
+    if audio_url and os.environ.get("ASSEMBLYAI_API_KEY"):
+        transcript = transcribe_with_assemblyai(audio_url)
         if transcript:
-            return transcript, "groq_whisper"
-
-    # Tier 3: YouTube fallback
-    handle = channel.get("handle")
-    if handle:
-        print(f"    Trying YouTube fallback...")
-        transcript = get_youtube_transcript(handle, title)
-        if transcript:
-            return transcript, "youtube"
+            return transcript, "assemblyai"
 
     return None, "none"
 
@@ -813,18 +918,6 @@ def fetch_all_podcasts(days_back: int = 2, max_per_channel: int = 2) -> list:
                 if result:
                     transcript, duration = result
                     ep["_youtube_url"] = video_url
-
-            # Tier 1.5: caption/auto-caption transcript (fallback)
-            if not transcript:
-                video_id = None
-                if ep.get("youtube_match"):
-                    video_id = ep["youtube_match"].get("video_id") or (video_url.split("v=")[-1] if video_url and "v=" in video_url else None)
-                elif ep.get("video_id"):
-                    video_id = ep["video_id"]
-                if video_id:
-                    caption = get_youtube_caption_transcript(video_id)
-                    if caption:
-                        transcript, duration = caption
 
             if transcript:
                 # Skip long livestreams (e.g. 7-8hr MTS streams)
